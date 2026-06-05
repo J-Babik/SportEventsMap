@@ -9,8 +9,8 @@ c.execute("""CREATE TABLE IF NOT EXISTS facilities(
                 object_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 object TEXT NOT NULL,
                 type_of_obj TEXT NOT NULL,
-                x FLOAT,
-                y FLOAT)""")
+                lon FLOAT,
+                lat FLOAT)""")
 
 #WYDARZENIA
 c.execute("""CREATE TABLE IF NOT EXISTS events
