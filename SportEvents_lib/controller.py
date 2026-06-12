@@ -1,203 +1,306 @@
 import sqlite3
-import folium
+import os
+import tkinter as tk
+from tkinter import ttk, messagebox
 from geopy.geocoders import Nominatim
-conn = sqlite3.connect('SportEventsMap.db')
+
+GUI_ELEMENTS = {}
+MAP_WIDGET = None
+
+TABLE_CONFIG = {
+    "Obiekty": {"db_table": "facilities", "id_col": "object_id", "db_cols": ["object", "type_of_obj", "lon", "lat"]},
+    "Wydarzenia": {"db_table": "events", "id_col": "event_id", "db_cols": ["event_name", "term", "object_id"]},
+    "Goście": {"db_table": "guests", "id_col": "guest_id", "db_cols": ["guest_name", "guest_surname", "event_id"]},
+    "Pracownicy": {"db_table": "workers", "id_col": "worker_id",
+                   "db_cols": ["worker_name", "worker_surname", "event_id"]}
+}
+
+#
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, 'SportEventsMap.db')
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 c = conn.cursor()
+c.execute("PRAGMA foreign_keys = ON;")
 
-def is_id_available(table, column, value):
-    query = f"SELECT 1 FROM {table} WHERE {column} = ?"
-    c.execute(query, (int(value),))
-    return c.fetchone() is None
+def check_login(login, password, login_window, success_callback):
+    if login == "admin" and password == "admin":
+        login_window.destroy()
+        success_callback()
+    else:
+        messagebox.showerror("Błąd", "Nieprawidłowy login lub hasło!")
 
-def view_list(table):
-    query = f"SELECT * FROM {table}"
-    c.execute(query)
-    rows = c.fetchall()
-    print(rows)
 
-#CRUD
-def add_worker():
-    id = input("Podaj nowe id pracownika: ")
-    if not is_id_available('workers', 'worker_id', id):
-        print("Pracownik o takim id już istnieje")
-        return
-    name = input("Podaj imię: ")
-    surname = input("Podaj nazwisko: ")
-    c.execute("SELECT * FROM events")
-    rows = c.fetchall()
-    for row in rows:
-        print(f"ID: {row[0]}, Wydarzenie: {row[1]}")
-    event = input("Podaj id wydarzenia do przypisania: ")
-
-    if id and name and surname and event:
-            if is_id_available('events', 'event_id', id):
-                c.execute(
-                    "INSERT INTO workers VALUES (?, ?, ?, ?)", (id, name, surname, event))
-                conn.commit()
-                print(f"Dodano pracownika {name} {surname}")
-
-def add_event():
-    name = input("Podaj nazwę wydarzenia: ")
-    term = input("Podaj datę wydarzenia: ")
-    c.execute("SELECT * FROM facilities")
-    rows = c.fetchall()
-    for row in rows:
-        print(f"ID: {row[0]}, Obiekt: {row[1]}")
-    place = input("Podaj id obiektu do przypisania wydarzenia: ")
-
-    if name and term and place:
-            if not is_id_available('facilities', 'object_id', place):
-                c.execute(
-                    "INSERT INTO events VALUES (NULL, ?, ?, ?)", (name, term, place))
-                conn.commit()
-                print(f"Dodano wydarzenie {name} na obiekcie {place}")
+def set_map_widget(widget):
+    global MAP_WIDGET
+    MAP_WIDGET = widget
 
 def get_coords_from_address(address):
     geolocator = Nominatim(user_agent="SportEventsMap_v1")
     location = geolocator.geocode(address)
     if location:
-        return [location.latitude, location.longitude]
+        return [location.longitude, location.latitude]
     return None
 
-def add_facility():
-    object = input("Podaj nazwę obiektu: ")
-    type_of_obj = input("Podaj typ obiektu: ")
-    address = input("Wpisz adres do wyszukania: ")
-    coords = get_coords_from_address(address)
-    if not coords:
-        print("Nie znaleziono podanego adresu.")
-        return
 
-    print(f"Znalezione współrzędne: {coords}")
-    lon, lat = coords
-    c.execute("INSERT INTO facilities VALUES (NULL, ?, ?, ?, ?)", (object, type_of_obj, lon, lat))
-    conn.commit()
-    print(f"Dodano obiekt {object} ({type_of_obj})")
+def get_facilities_for_dropdown():
+    c.execute("SELECT object_id, object FROM facilities")
+    return [f"{row[0]} - {row[1]}" for row in c.fetchall()]
 
-def create_facilities_map():
 
-    m = folium.Map(location=[52.23, 21], zoom_start=7)
-    c.execute("SELECT object, type_of_obj, lon, lat FROM facilities")
-    rows = c.fetchall()
-    for row in rows:
-        object, type_obj, lon, lat = row
-        folium.Marker(
-        location=[lat, lon],
-        tooltip=f"({object}",
-        popup=f"{type_obj}",
-        icon=folium.Icon(icon="cloud")
-    ).add_to(m)
+def get_events_for_dropdown():
+    c.execute("SELECT event_id, event_name FROM events")
+    return [f"{row[0]} - {row[1]}" for row in c.fetchall()]
 
-    m.save("twoja_mapa.html")
-    print("Mapa 'twoja_mapa.html' została wygenerowana.")
 
-def create_events_map():
+def get_view_data(tab_name):
+    if tab_name == "Obiekty":
+        c.execute('''SELECT f.object_id, f.object, f.type_of_obj, COUNT(e.event_id), f.lon, f.lat
+                     FROM facilities f
+                              LEFT JOIN events e ON f.object_id = e.object_id
+                     GROUP BY f.object_id''')
+    elif tab_name == "Wydarzenia":
+        c.execute('''SELECT e.event_id,
+                            e.event_name,
+                            e.term,
+                            f.object_id || ' - ' || f.object,
+                            COUNT(DISTINCT g.guest_id),
+                            COUNT(DISTINCT w.worker_id)
+                     FROM events e
+                              LEFT JOIN facilities f ON e.object_id = f.object_id
+                              LEFT JOIN guests g ON e.event_id = g.event_id
+                              LEFT JOIN workers w ON e.event_id = w.event_id
+                     GROUP BY e.event_id''')
+    elif tab_name == "Goście":
+        c.execute('''SELECT g.guest_id, g.guest_name, g.guest_surname, e.event_id || ' - ' || e.event_name
+                     FROM guests g
+                              LEFT JOIN events e ON g.event_id = e.event_id''')
+    elif tab_name == "Pracownicy":
+        c.execute('''SELECT w.worker_id, w.worker_name, w.worker_surname, e.event_id || ' - ' || e.event_name
+                     FROM workers w
+                              LEFT JOIN events e ON w.event_id = e.event_id''')
+    return c.fetchall()
 
-    m = folium.Map(location=[52.23, 21], zoom_start=7)
-    c.execute("SELECT object, type_of_obj, lon, lat FROM events")
-    rows = c.fetchall()
-    for row in rows:
-        object, type_obj, lon, lat = row
-        folium.Marker(
-        location=[lat, lon],
-        tooltip=f"({object}",
-        popup=f"{type_obj}",
-        icon=folium.Icon(icon="cloud")
-    ).add_to(m)
 
-    m.save("twoja_mapa.html")
-    print("Mapa 'twoja_mapa.html' została wygenerowana.")
+def search_view_data(tab_name, phrase):
+    phrase = f"%{phrase}%"
+    if tab_name == "Obiekty":
+        c.execute('''SELECT f.object_id, f.object, f.type_of_obj, COUNT(e.event_id), f.lon, f.lat
+                     FROM facilities f
+                              LEFT JOIN events e ON f.object_id = e.object_id
+                     WHERE f.object LIKE ?
+                     GROUP BY f.object_id''', (phrase,))
+    elif tab_name == "Wydarzenia":
+        c.execute('''SELECT e.event_id, e.event_name, e.term, f.object_id || ' - ' || f.object
+                     FROM events e
+                              LEFT JOIN facilities f ON e.object_id = f.object_id
+                     WHERE e.event_name LIKE ?''', (phrase,))
+    elif tab_name == "Goście":
+        c.execute('''SELECT g.guest_id, g.guest_name, g.guest_surname, e.event_id || ' - ' || e.event_name
+                     FROM guests g
+                              LEFT JOIN events e ON g.event_id = e.event_id
+                     WHERE g.guest_name LIKE ?
+                        OR g.guest_surname LIKE ?''', (phrase, phrase))
+    elif tab_name == "Pracownicy":
+        c.execute('''SELECT w.worker_id, w.worker_name, w.worker_surname, e.event_id || ' - ' || e.event_name
+                     FROM workers w
+                              LEFT JOIN events e ON w.event_id = e.event_id
+                     WHERE w.worker_name LIKE ?
+                        OR w.worker_surname LIKE ?''', (phrase, phrase))
+    return c.fetchall()
 
-def add_guest():
-    id = input("Podaj nowe id gościa: ")
-    if not is_id_available('guests', 'guest_id', id):
-        print("Gość o takim id już istnieje")
-        return
-    name = input("Podaj imię: ")
-    surname = input("Podaj nazwisko: ")
-    c.execute("SELECT * FROM events")
-    rows = c.fetchall()
-    for row in rows:
-        print(f"ID: {row[0]}, Wydarzenie: {row[1]}")
-    event = input("Podaj id wydarzenia do przypisania: ")
 
-    if id and name and surname and event:
-        if is_id_available('events', 'event_id', id):
-            c.execute(
-                "INSERT INTO guests VALUES (?, ?, ?, ?)", (id, name, surname, event))
-            conn.commit()
-            print(f"Dodano gościa {name} {surname}")
+def refresh_dropdowns():
+    try:
+        facilities = get_facilities_for_dropdown()
+        events = get_events_for_dropdown()
+        if "Wydarzenia" in GUI_ELEMENTS:
+            GUI_ELEMENTS["Wydarzenia"]['entries']["Wybierz Obiekt"].config(values=facilities)
+        if "Goście" in GUI_ELEMENTS:
+            GUI_ELEMENTS["Goście"]['entries']["Wybierz Wydarzenie"].config(values=events)
+        if "Pracownicy" in GUI_ELEMENTS:
+            GUI_ELEMENTS["Pracownicy"]['entries']["Wybierz Wydarzenie"].config(values=events)
+    except Exception:
+        pass
 
-def record_remover(table, id_column):
-    view_list(table)
-    remove_id = input("Podaj id do usunięcia: ")
-    query = f"DELETE FROM {table} WHERE {id_column} = ?"
-    c.execute(query, (remove_id,))
-    conn.commit()
 
-def updater(table, id_column):
-    c.execute(f"SELECT * FROM {table}")
-    rows = c.fetchall()
-    for row in rows:
-        print(f"ID: {row[0]}, Obiekt: {row[1]}")
-    update_id = input("Podaj id do edycji: ")
-    column_names = [description[0] for description in c.description]
-    new_values = []
-    query_parts = []
-    c.execute(f"SELECT * FROM {table} WHERE {id_column} = ?", (update_id,))
-    row = c.fetchone()
-    for i in range(1, len(column_names)):
-        col = column_names[i]
-        old_val = row[i]
-        new_val = input(f"Aktualna wartość dla '{col}' ({old_val}): ")
-        if new_val: # Jeśli użytkownik coś wpisał
-                    query_parts.append(f"{col} = ?")
-                    new_values.append(new_val)
-    if query_parts:
-        sql = f"UPDATE {table} SET {', '.join(query_parts)} WHERE {id_column} = ?"
-        new_values.append(update_id)  # Dodajemy ID do warunku WHERE
-        c.execute(sql, tuple(new_values))
+def load_data_to_tree(tab_name):
+    tree = GUI_ELEMENTS[tab_name]['tree']
+    for item in tree.get_children():
+        tree.delete(item)
+
+    for row in get_view_data(tab_name):
+        tree.insert("", "end", values=row)
+
+    refresh_dropdowns()
+    if tab_name == "Obiekty":
+        update_map_markers()
+
+
+def refresh_all_tabs():
+    for tab in TABLE_CONFIG.keys():
+        load_data_to_tree(tab)
+
+
+def filter_data(tab_name):
+    phrase = GUI_ELEMENTS[tab_name]['search_entry'].get()
+    if not phrase:
+        return load_data_to_tree(tab_name)
+
+    tree = GUI_ELEMENTS[tab_name]['tree']
+    for item in tree.get_children():
+        tree.delete(item)
+
+    for row in search_view_data(tab_name, phrase):
+        tree.insert("", "end", values=row)
+
+    if tab_name == "Obiekty":
+        update_map_markers()
+
+
+def clear_form(tab_name):
+    entries = GUI_ELEMENTS[tab_name]['entries']
+    entries['ID'].config(state='normal')
+    entries['ID'].delete(0, tk.END)
+    entries['ID'].config(state='readonly')
+    for field, ent in list(entries.items())[1:]:
+        if isinstance(ent, ttk.Combobox):
+            ent.set('')
+        else:
+            ent.delete(0, tk.END)
+
+
+def load_to_edit(tab_name):
+    tree = GUI_ELEMENTS[tab_name]['tree']
+    selected = tree.selection()
+    if not selected: return
+
+    values = tree.item(selected[0], "values")
+    entries = GUI_ELEMENTS[tab_name]['entries']
+    clear_form(tab_name)
+
+    entries['ID'].config(state='normal')
+    entries['ID'].insert(0, values[0])
+    entries['ID'].config(state='readonly')
+
+    fields = list(entries.keys())[1:]
+    for i, field in enumerate(fields):
+        if tab_name == "Obiekty" and field == "Adres (do Geokodowania)":
+            continue
+        if i + 1 < len(values):
+            val = str(values[i + 1])
+            if field in ["Wybierz Obiekt", "Wybierz Wydarzenie"]:
+                entries[field].set(val)
+            else:
+                entries[field].insert(0, val)
+
+def delete_selected(tab_name):
+    tree = GUI_ELEMENTS[tab_name]['tree']
+    selected = tree.selection()
+    if not selected: return
+
+    db_table = TABLE_CONFIG[tab_name]["db_table"]
+    id_col = TABLE_CONFIG[tab_name]["id_col"]
+
+    for item in selected:
+        record_id = tree.item(item, "values")[0]
+        c.execute(f"DELETE FROM {db_table} WHERE {id_col} = ?", (record_id,))
         conn.commit()
-        print("Rekord zaktualizowany!")
 
-def main():
+    refresh_dropdowns()
+    load_data_to_tree(tab_name)
 
-    while True:
-        print("==========MENU============")
-        print("0 - zakończ program")
-        print("1 - dodaj pracownika")
-        print("2 - dodaj wydarzenie")
-        print("3 - dodaj obiekt")
-        print("4 - dodaj gościa")
-        print("5 - zobacz listę obiektów")
-        print("6 - zobacz listę wydarzeń")
-        print("7 - zobacz listę pracowników")
-        print("8 - zobacz listę gości")
-        print("9 - usuwacz")
-        choice = input("Wybierz opcję menu: ")
-        print(f"Wybrano opcję {choice}")
-        if choice == "0":
-            break
-        if choice == "1":
-            add_worker()
-        if choice == "2":
-            add_event()
-        if choice == "3":
-            add_facility()
-        if choice == "4":
-            add_guest()
-        if choice == "5":
-            view_list('facilities')
-        if choice == "6":
-            view_list('events')
-        if choice == "7":
-            view_list('workers')
-        if choice == "8":
-            updater('workers', 'worker_id')
-        if choice == "9":
-            record_remover('workers', 'worker_id')
-        if choice == "10":
-            create_facilities_map()
-if __name__ == "__main__":
-    main()
 
+def save_new(tab_name):
+    entries = GUI_ELEMENTS[tab_name]['entries']
+    vals = []
+    for field, ent in list(entries.items())[1:]:
+        val = ent.get()
+        if field in ["Wybierz Obiekt", "Wybierz Wydarzenie"] and val:
+            val = val.split(" - ")[0]
+        vals.append(val)
+
+    if tab_name == "Obiekty":
+        coords = get_coords_from_address(vals[2])
+        if coords:
+            c.execute("INSERT INTO facilities (object, type_of_obj, lon, lat) VALUES (?, ?, ?, ?)",
+                      (vals[0], vals[1], coords[0], coords[1]))
+            conn.commit()
+        else:
+            messagebox.showerror("Błąd", "Nie znaleziono podanego adresu na mapie.")
+            return
+    elif tab_name == "Wydarzenia":
+        c.execute("INSERT INTO events (event_name, term, object_id) VALUES (?, ?, ?)", tuple(vals))
+        conn.commit()
+    elif tab_name == "Goście":
+        c.execute("INSERT INTO guests (guest_name, guest_surname, event_id) VALUES (?, ?, ?)", tuple(vals))
+        conn.commit()
+    elif tab_name == "Pracownicy":
+        c.execute("INSERT INTO workers (worker_name, worker_surname, event_id) VALUES (?, ?, ?)", tuple(vals))
+        conn.commit()
+
+    clear_form(tab_name)
+    refresh_all_tabs()
+
+
+def update_existing(tab_name):
+    entries = GUI_ELEMENTS[tab_name]['entries']
+    record_id = entries['ID'].get()
+    if not record_id: return
+
+    db_table = TABLE_CONFIG[tab_name]["db_table"]
+    id_col = TABLE_CONFIG[tab_name]["id_col"]
+
+    if tab_name == "Obiekty":
+        c.execute(f"UPDATE {db_table} SET object = ?, type_of_obj = ? WHERE {id_col} = ?",
+                  (entries["Nazwa"].get(), entries["Typ Obiektu"].get(), record_id))
+        conn.commit()
+        clear_form(tab_name)
+        refresh_all_tabs()
+        return
+
+    db_cols = TABLE_CONFIG[tab_name]["db_cols"]
+    fields = list(entries.keys())[1:]
+
+    query_parts = []
+    new_values = []
+
+    for i, col in enumerate(db_cols):
+        if i < len(fields):
+            val = entries[fields[i]].get()
+            if fields[i] in ["Wybierz Obiekt", "Wybierz Wydarzenie"] and val:
+                val = val.split(" - ")[0]
+            if val:
+                query_parts.append(f"{col} = ?")
+                new_values.append(val)
+
+    if query_parts:
+        new_values.append(record_id)
+        c.execute(f"UPDATE {db_table} SET {', '.join(query_parts)} WHERE {id_col} = ?", tuple(new_values))
+        conn.commit()
+
+    clear_form(tab_name)
+    load_data_to_tree(tab_name)
+
+def update_map_markers():
+    if not MAP_WIDGET or "Obiekty" not in GUI_ELEMENTS:
+        return
+    MAP_WIDGET.delete_all_marker()
+
+    tree = GUI_ELEMENTS["Obiekty"]['tree']
+    for item in tree.get_children():
+        values = tree.item(item, "values")
+        lat, lon = values[5], values[4]
+        if lat and lon and lat != 'None':
+            MAP_WIDGET.set_marker(float(lat), float(lon), text=values[1],
+                                  command=lambda marker: MAP_WIDGET.set_position(marker.position[0],
+                                                                                 marker.position[1]))
+
+def show_on_map(event, tab_name):
+    tree = GUI_ELEMENTS[tab_name]['tree']
+    selected = tree.selection()
+    if selected:
+        values = tree.item(selected[0], "values")
+        lat, lon = values[5], values[4]
+        if lat and lon and lat != 'None':
+            MAP_WIDGET.set_position(float(lat), float(lon))
+            MAP_WIDGET.set_zoom(11)
